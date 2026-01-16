@@ -2,6 +2,7 @@ import { Blob } from '@google/genai';
 
 /**
  * Decodes a base64 string into a Uint8Array.
+ * Optimized for robustness.
  */
 export function decode(base64: string): Uint8Array {
   const binaryString = atob(base64);
@@ -27,25 +28,29 @@ export function encode(bytes: Uint8Array): string {
 
 /**
  * Converts Float32Array PCM audio data (from Web Audio API) to a proprietary 
- * JSON Blob format expected by the Gemini Live API (Int16 PCM wrapped in base64).
+ * JSON Blob format expected by the Gemini Live API.
+ * Converts Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767).
  */
 export function createBlob(data: Float32Array): Blob {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
-    // Convert float (-1.0 to 1.0) to int16 (-32768 to 32767)
-    // Clamping is good practice although usually input is within range
+    // Clamp values to prevent distortion
     const s = Math.max(-1, Math.min(1, data[i]));
+    // Convert to 16-bit PCM
     int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
   }
+  
+  const uint8 = new Uint8Array(int16.buffer);
   return {
-    data: encode(new Uint8Array(int16.buffer)),
+    data: encode(uint8),
     mimeType: 'audio/pcm;rate=16000',
   };
 }
 
 /**
  * Decodes raw PCM bytes (Int16, little-endian) from Gemini into an AudioBuffer.
+ * Handles buffer alignment and conversion from Int16 to Float32.
  */
 export async function decodeAudioData(
   data: Uint8Array,
@@ -53,15 +58,24 @@ export async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  // Create Int16Array view on the buffer
+  // We use data.buffer directly. If the Uint8Array is a view on a larger buffer,
+  // we must take offset into account.
+  // slice() ensures we have a clean ArrayBuffer starting at 0 for the Int16Array
+  const bufferCopy = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  const dataInt16 = new Int16Array(bufferCopy);
+  
   const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+  const audioBuffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
   for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
+    const channelData = audioBuffer.getChannelData(channel);
     for (let i = 0; i < frameCount; i++) {
+      // Interleaved data: [L, R, L, R...] if stereo. 
+      // Gemini usually sends mono, so this loop works for mono (stride=1) too.
+      // Convert Int16 to Float32
       channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
   }
-  return buffer;
+  return audioBuffer;
 }

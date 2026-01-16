@@ -17,46 +17,53 @@ export const useLiveSession = () => {
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const outputNodeRef = useRef<GainNode | null>(null);
   
-  // State for playback scheduling
+  // Playback state
   const nextStartTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   
-  // The active session promise/reference
-  // We use a ref to the session object itself if available, or just the promise
-  // However, the example uses `sessionPromise.then(session => ...)`. 
-  // We'll keep a ref to the active session object to call `close()` on it.
-  const sessionRef = useRef<any>(null); // Using 'any' as the Session type isn't fully exported in all alpha versions, but strictly it's `LiveSession`
+  // Session management
+  const currentSessionRef = useRef<any>(null);
 
   const disconnect = useCallback(async () => {
-    // 1. Close session
-    if (sessionRef.current) {
+    console.log("Disconnecting...");
+    // 1. Close API Session
+    if (currentSessionRef.current) {
       try {
-        await sessionRef.current.close();
+        await currentSessionRef.current.close();
+        console.log("Session closed");
       } catch (e) {
         console.warn("Error closing session:", e);
       }
-      sessionRef.current = null;
+      currentSessionRef.current = null;
     }
 
-    // 2. Stop all playing audio
+    // 2. Stop Audio Sources
     activeSourcesRef.current.forEach(source => {
-      try {
-        source.stop();
-      } catch (e) { /* ignore */ }
+      try { source.stop(); } catch (e) { /* ignore */ }
     });
     activeSourcesRef.current.clear();
 
-    // 3. Close Audio Contexts
+    // 3. Cleanup Input
+    if (inputSourceRef.current) {
+      inputSourceRef.current.mediaStream.getTracks().forEach(track => track.stop());
+      inputSourceRef.current = null;
+    }
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.disconnect();
+      scriptProcessorRef.current = null;
+    }
     if (inputAudioContextRef.current) {
-      await inputAudioContextRef.current.close();
+      try { await inputAudioContextRef.current.close(); } catch(e){}
       inputAudioContextRef.current = null;
     }
+
+    // 4. Cleanup Output
     if (outputAudioContextRef.current) {
-      await outputAudioContextRef.current.close();
+      try { await outputAudioContextRef.current.close(); } catch(e){}
       outputAudioContextRef.current = null;
     }
 
-    // 4. Reset State
+    // 5. Reset State
     setConnectionState(ConnectionState.DISCONNECTED);
     setIsAiSpeaking(false);
     setVolume(0);
@@ -64,88 +71,103 @@ export const useLiveSession = () => {
   }, []);
 
   const connect = useCallback(async () => {
+    console.log("Starting connection...");
     try {
       setError(null);
       setConnectionState(ConnectionState.CONNECTING);
 
-      // Initialize API
       if (!process.env.API_KEY) {
         throw new Error("API Key is missing.");
       }
+
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-      // Initialize Audio Contexts
-      // Input: 16kHz for Gemini
-      // Output: 24kHz usually from Gemini Live
+      // 1. Setup Audio Contexts
+      // Input: 16kHz required by Gemini
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      // Output: 24kHz required for Gemini response
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
-      // Resume contexts (needed for some browsers)
-      if (inputCtx.state === 'suspended') await inputCtx.resume();
-      if (outputCtx.state === 'suspended') await outputCtx.resume();
+      // Force resume contexts immediately (browser autoplay policy)
+      await Promise.all([
+        inputCtx.resume(),
+        outputCtx.resume()
+      ]);
 
-      // Output Gain Node (Volume Control)
+      // Output Gain
       const outputGain = outputCtx.createGain();
       outputGain.connect(outputCtx.destination);
       outputNodeRef.current = outputGain;
 
-      // Get Mic Stream
+      // 2. Get Microphone Stream
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      // Connect to Gemini Live
-      const sessionPromise = ai.live.connect({
+      console.log("Microphone access granted");
+
+      // 3. Connect to Gemini Live
+      let sessionPromise: Promise<any>;
+
+      const config = {
         model: MODEL_NAME,
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, // 'Kore' is a gentle female voice often
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
           systemInstruction: SYSTEM_INSTRUCTION,
         },
         callbacks: {
           onopen: async () => {
+            console.log("WebSocket connection opened");
             setConnectionState(ConnectionState.CONNECTED);
             
-            // Setup Input Processing
+            // Setup Input Pipeline
             const source = inputCtx.createMediaStreamSource(stream);
             inputSourceRef.current = source;
             
-            // Using ScriptProcessor as per documentation examples (despite deprecation)
-            // Buffer size 4096 provides a good balance for this use case
+            // Use 4096 buffer size for balance between latency and performance
             const processor = inputCtx.createScriptProcessor(4096, 1, 1);
             scriptProcessorRef.current = processor;
 
             processor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               
-              // Simple volume meter logic for visualization
+              // Volume Meter
               let sum = 0;
               for(let i=0; i<inputData.length; i++) {
                 sum += inputData[i] * inputData[i];
               }
               const rms = Math.sqrt(sum / inputData.length);
-              // Update volume state only if not AI speaking (to show user mic activity)
-              // We'll update volume generally, the UI can decide what to show
               setVolume(rms);
 
+              // Create Blob and Send
               const pcmBlob = createBlob(inputData);
+              
+              // Use the promise to ensure session is ready
               sessionPromise.then(session => {
-                session.sendRealtimeInput({ media: pcmBlob });
+                try {
+                  session.sendRealtimeInput({ media: pcmBlob });
+                } catch (err) {
+                  console.error("Error sending input:", err);
+                }
               });
             };
 
             source.connect(processor);
             processor.connect(inputCtx.destination);
+
+            // Trigger initial greeting by sending a hidden text prompt
+            sessionPromise.then(session => {
+              session.sendRealtimeInput([{ text: "Hello Lisa, I am ready to start. Please greet me in Bangla." }]);
+            });
           },
           onmessage: async (message: LiveServerMessage) => {
              // Handle Interruption
-            const interrupted = message.serverContent?.interrupted;
-            if (interrupted) {
-              console.log("Interrupted!");
-              activeSourcesRef.current.forEach((src) => {
+             if (message.serverContent?.interrupted) {
+              console.log("Interrupted");
+              activeSourcesRef.current.forEach(src => {
                 try { src.stop(); } catch(e){}
               });
               activeSourcesRef.current.clear();
@@ -154,22 +176,20 @@ export const useLiveSession = () => {
               return;
             }
 
-            // Handle Audio Data
+            // Handle Audio Output
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio) {
               setIsAiSpeaking(true);
-              
               try {
                 // Ensure context is running
                 if (outputCtx.state === 'suspended') await outputCtx.resume();
 
-                // Decode
                 const audioBytes = decode(base64Audio);
                 const audioBuffer = await decodeAudioData(audioBytes, outputCtx, 24000, 1);
                 
-                // Schedule
-                // Ensure we don't schedule in the past
+                // Scheduling
                 const currentTime = outputCtx.currentTime;
+                // If next start time is in the past, reset it to now
                 if (nextStartTimeRef.current < currentTime) {
                   nextStartTimeRef.current = currentTime;
                 }
@@ -181,51 +201,47 @@ export const useLiveSession = () => {
                 source.start(nextStartTimeRef.current);
                 activeSourcesRef.current.add(source);
 
-                const duration = audioBuffer.duration;
-                nextStartTimeRef.current += duration;
+                nextStartTimeRef.current += audioBuffer.duration;
 
                 source.onended = () => {
                   activeSourcesRef.current.delete(source);
-                  // Approximate check if this was the last source
                   if (activeSourcesRef.current.size === 0) {
-                     // Add a small delay/buffer before saying AI stopped speaking to prevent flicker
                      setTimeout(() => {
                         if (activeSourcesRef.current.size === 0) {
                              setIsAiSpeaking(false);
                         }
-                     }, 200);
+                     }, 250);
                   }
                 };
               } catch (err) {
-                console.error("Error decoding audio", err);
+                console.error("Audio decoding error:", err);
               }
             }
           },
-          onclose: (e) => {
-            console.log("Session closed", e);
+          onclose: (e: any) => {
+            console.log("Session closed:", e);
             disconnect();
           },
-          onerror: (e) => {
-            console.error("Session error", e);
-            setError("Connection error occurred.");
+          onerror: (e: any) => {
+            console.error("Session error:", e);
+            setError("Connection failed. Please refresh and try again.");
             disconnect();
           }
         }
-      });
+      };
 
-      // Save session reference for cleanup
-      sessionPromise.then(sess => {
-        sessionRef.current = sess;
-      });
+      sessionPromise = ai.live.connect(config);
+      const session = await sessionPromise;
+      currentSessionRef.current = session;
 
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Failed to connect");
+      console.error("Connection setup failed:", err);
+      setError(err.message || "Failed to connect.");
       setConnectionState(ConnectionState.ERROR);
+      disconnect();
     }
   }, [disconnect]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       disconnect();

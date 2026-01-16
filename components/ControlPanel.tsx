@@ -27,13 +27,13 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     <button
       onClick={onConnect}
       disabled={isConnecting}
-      className={`px-8 py-4 rounded-full font-semibold shadow-lg transition transform hover:scale-105 flex items-center gap-2 text-white
-        ${isConnecting ? 'bg-slate-400 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700'}
+      className={`px-8 py-4 rounded-full font-semibold shadow-lg transition transform flex items-center gap-2 text-white min-w-[200px] justify-center
+        ${isConnecting ? 'bg-slate-400 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700 hover:scale-105'}
       `}
     >
       {isConnecting ? (
         <>
-          <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
@@ -44,7 +44,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
             <path fillRule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clipRule="evenodd" />
           </svg>
-          Start Lesson with Lisa
+          Start Lesson
         </>
       )}
     </button>
