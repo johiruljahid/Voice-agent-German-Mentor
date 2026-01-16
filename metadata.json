@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Deutsch mit Lisa - German Mentor",
+  "description": "A friendly AI German language mentor for Bangla speakers, powered by Gemini 2.5 Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
